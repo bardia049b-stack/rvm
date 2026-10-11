@@ -108,26 +108,19 @@ jobs:
           generate_release_notes: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
-            Install `rvm.apk` (arm64-v8a and x86_64), then download the other three.
+            Install rvm.apk and keep the other three files next to it. Image is a
+            riscv64 Linux 6.12 kernel, initrd.img is the initramfs that brings the
+            network up and then boots from the disk, and disk.img.gz is the Debian 13
+            disk image, which is compressed and has to be unzipped first. All three
+            have to come from this same release, or the boot will stop somewhere it
+            should not.
 
-            | file | what it is |
-            | --- | --- |
-            | `Image` | riscv64 Linux 6.12 with virtio-mmio, virtio-blk, virtio-net and ext4 built in |
-            | `initrd.img` | busybox initramfs: brings eth0 up, then hands the console to `/dev/vda` |
-            | `disk.img.gz` | Debian 13 minbase with getty, apt, curl and eth0 up at boot. Unzip it first |
-
-            The kernel, the initrd and the disk have to come from the same release, or the
-            boot will end somewhere it should not.
-
-            In the app: menu -> Kernel, Disk, Initrd, pick the files, then menu -> Boot.
-            Nothing else to configure.
-
-            Networking is the emulator's own userspace NAT: the guest gets 10.0.2.15/24 with
-            gateway 10.0.2.2 and resolver 10.0.2.3, so ping, curl, wget and ssh out work
-            inside the guest without a TAP device or root. The address is negotiated by
-            `initrd.img` as the kernel hands over, so keep booting with all three files.
-            To let the guest ask again, `dhclient eth0` still works. `apt-get update` is
-            broken inside the guest at the moment; see the CHANGELOG for what is known.
+            In the app, open the menu, pick Kernel, Disk and Initrd, then open the
+            menu again and press Boot. Networking needs no TAP device and no root:
+            the guest gets 10.0.2.15/24, gateway 10.0.2.2 and resolver 10.0.2.3
+            through the emulator's own NAT, so ping, curl, wget and ssh out work
+            inside the guest. apt-get update does not work yet, the CHANGELOG says
+            what is known about it.
 
           files: assets/rvm.apk
           fail_on_unmatched_files: true
