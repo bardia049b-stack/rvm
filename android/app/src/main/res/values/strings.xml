@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<resources>
+    <string name="app_title">RVM</string>
+    <string name="app_name">RVM</string>
+    <string name="boot">Boot</string>
+    <string name="stop">Stop</string>
+    <string name="kernel">Kernel</string>
+    <string name="disk">Disk</string>
+    <string name="initrd">Initrd</string>
+    <string name="idle">idle</string>
+    <string name="desc_up">Up</string>
+    <string name="desc_down">Down</string>
+    <string name="desc_left">Left</string>
+    <string name="desc_right">Right</string>
+    <string name="desc_keyboard">Keyboard</string>
+    <string name="menu">Menu</string>
+    <string name="clear">Clear</string>
+    <string name="debug_on">Debug log: on</string>
+    <string name="debug_off">Debug log: off</string>
+    <string name="menu_glyph">\u2261</string>
+    <string name="machine">Machine…</string>
+    <string name="shell_on">Boot to shell: on</string>
+    <string name="shell_off">Boot to shell: off</string>
+</resources>

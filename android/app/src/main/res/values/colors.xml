@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<resources>
+    <color name="paper">#000000</color>
+    <color name="paper_dark">#1B1B1B</color>
+    <color name="ink">#E6E6E6</color>
+    <color name="ink_soft">#9A9A9A</color>
+    <color name="rule">#2E2E2E</color>
+
+    <color name="on_ink">#FFFFFF</color>
+    <color name="on_ink_soft">#B0B0B0</color>
+</resources>
