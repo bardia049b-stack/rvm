@@ -1,0 +1,80 @@
+	Changelog
+
+	0.1.0
+
+First release, so this is a description of what is in the tree rather than a list
+of differences.
+
+If you are here for the files: the release has four assets and three of them go
+together. rvm.apk is the emulator for Android, arm64-v8a and x86_64. Image is a
+riscv64 Linux 6.12 kernel with virtio-mmio, virtio-blk, virtio-net and ext4 built
+in. initrd.img is a busybox initramfs that brings eth0 up and then hands the
+console to /dev/vda. disk.img.gz is a Debian 13 minbase image with getty, apt,
+curl and eth0 coming up at boot; unzip it first. The kernel, the initrd and the
+disk have to come from the same release, so keep all three together.
+
+Core
+
+RV64IMAFDC, so the base integer set with M, A, F, D and the compressed
+extension. Compressed instructions are expanded to their 32 bit form before
+decode, which leaves one execution path for everything.
+
+Sv39, Sv48 and Sv57 page tables in a single walk loop, superpages at every level,
+hardware A and D bits and a direct mapped TLB with a generation tag.
+
+Machine and supervisor mode with the full trap path, medeleg and mideleg,
+mret, sret, wfi, sfence.vma, ecall and ebreak, plus the SBI a Linux kernel
+expects (base, timer, console putchar, system reset).
+
+Devices
+
+ns16550a UART at 0x10000000, IRQ 10, 16 byte FIFO. CLINT at 0x02000000 with
+msip, mtimecmp and a 10 MHz timebase. PLIC at 0x0c000000 with 64 sources and one
+machine plus one supervisor context. Eight virtio-mmio slots at 0x10001000:
+virtio-blk on slot 0 backed by a host file with pread and pwrite, virtio-net on
+slot 1 with a TAP backend on Linux and a user mode NAT stack for Android.
+
+Boot
+
+The device tree is built in C at boot, so no DTB file is needed. dtb/rvm.dts is
+the same tree written out by hand and make dtb compiles it for comparison.
+The loader takes ELF64 with PT_LOAD segments or a raw blob.
+
+The default command line is console=ttyS0 earlycon=ns16550a,mmio32,0x10000000
+root=/dev/vda rootwait rw. rvm.shell=1 stays in the initramfs instead of handing
+the console over, and rvm.shell=root hands it to the disk's /bin/sh without
+running its init scripts. rvm.time=virtual makes the guest clock follow retired
+instructions rather than the host wall clock, which is what keeps a slow phone
+from looking like a stuck one.
+
+Android
+
+One Activity and three custom Views, no AndroidX, no Material, no Compose, no
+WebView. Terminal on Canvas, graphics on SurfaceView, the release APK around
+150 KB. Kernels and disk images are picked through the system file picker and
+copied into the app's private storage. The app takes a partial wake lock while a
+VM runs, has a machine line for RAM size and CPU count, and ships the initramfs
+as an asset so only a kernel and a disk have to be picked by hand.
+
+Tools and CI
+
+tools/fetch_kernel.sh pulls a riscv64 kernel out of the Debian pool,
+tools/mkrootfs.sh debootstraps the disk image under qemu-user-static,
+tools/mkinitrd.sh builds the initramfs, tools/run.sh boots the lot and can set up
+a TAP device, --gdb or a trace. build, test and android run on every push; kernel,
+rootfs and release run on a v* tag and attach everything to the GitHub release.
+
+Tests
+
+34 suites and 677 assertions, run under gcc and clang, optimised with -Werror,
+and under AddressSanitizer and UndefinedBehaviorSanitizer. The harness builds a
+real machine with a hand built bus, so the CPU can be tested without a VM.
+
+Known issues
+
+apt-get update inside the guest aborts with std::bad_alloc a few seconds in,
+before it asks the network for anything. ping, DNS, curl, wget, ssh out and
+dpkg all work. See PLAN, step 9 for what has been ruled out already.
+
+virtio-gpu, virtio-input and virtio-snd are not written yet, so the guest has no
+graphics or sound.

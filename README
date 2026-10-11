@@ -1,0 +1,143 @@
+	RVM
+
+RVM is a RISC-V system emulator for 64 bit machines. It implements RV64IMAFDC,
+the Sv39, Sv48 and Sv57 page tables, and enough of virtio to boot a stock Debian
+kernel and userland from a disk image. It runs on Linux and macOS, and there is
+an Android app under android/.
+
+It is C11 against libc and libm. Nothing else is needed to build it.
+
+
+Building
+--------
+
+	make
+
+gives you ./rvm, about 100 KB. A C11 compiler and GNU make are enough.
+
+	make test
+
+builds and runs the test suite, currently 34 suites and 677 assertions.
+
+	make lint
+	make MODE=sanity test
+	make format
+
+are the -Werror syntax pass, an ASan and UBSan build, and clang-format.
+docs/BUILDING has every target, mode and variable.
+
+
+Running it
+----------
+
+Every GitHub release has a kernel, an initrd and a disk image attached, so
+downloading those is the shortest way. To build them yourself:
+
+	./tools/fetch_kernel.sh --out vmlinux
+	sudo ./tools/mkrootfs.sh --out disk.img
+	./tools/run.sh
+
+The boot ends at a login prompt on ttyS0. mkrootfs.sh needs root, around 2 GB of
+free memory and a route to deb.debian.org.
+
+No DTB file is required: rvm builds its device tree at boot. dtb/rvm.dts is the
+same tree written out for editing, and make dtb compiles it if you want to
+compare the two.
+
+	./rvm --help
+
+prints the options. The useful ones are -m for guest memory, -k for the kernel,
+-d for the disk, --stats for counters and --trace-from for the instruction
+trace.
+
+
+Documentation
+-------------
+
+	PLAN			what is built, what is not, and the rules
+	CHANGELOG		what changed
+	CONTRIBUTING		how to send a patch
+	SECURITY		how to report a guest escape
+	docs/ARCHITECTURE	how the pieces fit together
+	docs/BUILDING		build modes, targets, the APK, CI
+	docs/DEBUGGING		tracing a guest that goes wrong
+
+
+Android
+-------
+
+The app lives in android/. It is one Activity and three custom Views. There is
+no AndroidX, no Material Components, no Compose and no WebView: the terminal is
+drawn on a Canvas and the graphics output goes to a SurfaceView. The
+dependencies block in android/app/build.gradle.kts is empty and should stay
+that way.
+
+android/jni/CMakeLists.txt compiles src/ directly, so there is one copy of the
+emulator and the desktop build cannot drift away from the phone build.
+
+	cd android && gradle --no-daemon assembleDebug
+
+There is no gradle wrapper jar in this repository, so ./gradlew does not exist.
+Use your own Gradle 8.11.1, or let CI do the build. The release APK is around
+150 KB, and the workflow fails if it ever goes over 5 MB.
+
+
+Booting on a phone
+------------------
+
+The default kernel cmdline is
+
+	console=ttyS0 earlycon=ns16550a,mmio32,0x10000000 root=/dev/vda rootwait rw
+
+with no init= anywhere. What decides whether you get a shell is the initrd:
+tools/mkinitrd.sh builds a busybox initramfs whose /init brings eth0 up through
+the built-in NAT and then, if /dev/vda has an /sbin/init, hands the console over
+to it so you land in the distro. Putting rvm.shell=1 on --bootargs keeps the
+initramfs shell instead and skips the hand-off.
+
+The APK ships that same initramfs as an asset, so on a phone Kernel and Disk are
+the only two files you have to pick.
+
+Two more bootargs matter there, and the app passes both. rvm.time=virtual makes
+mtime follow retired instructions instead of the host wall clock (see
+src/devices/clint.c), so a boot that is slow because the host is slow is not
+also a guest that believes its CPU is stuck. nosoftlockup silences the kernel
+watchdog, which on a device with a foreground app and a two gigabyte copy in
+progress tends to report true things in the wrong order.
+
+The app also has a machine line: menu -> Machine edits ram=1536 cpu=1, clamped
+to 256-4096 MiB and remembered between runs. After Boot the console prints the
+sizes the VM really got.
+
+While a VM is running the app holds a PARTIAL_WAKE_LOCK. Without it Android
+stops scheduling the vCPU thread when the screen times out, and a boot that
+needs tens of minutes of CPU on a phone simply halts mid-init without saying
+anything.
+
+"Boot to shell" is a branch inside the initramfs /init, not something the
+emulator implements, so an initrd copied out of an older release accepts the
+flag and ignores it. The app reads the image it is about to boot, puts its own
+copy in place when that image predates the feature, and prints the boot
+arguments and the initrd's capability in the banner. That banner is what tells
+you which of the two ways the setting did nothing.
+
+Adding shell=1 to the machine line skips the disk's init scripts and hands the
+console to its /bin/sh instead (the initramfs calls this rvm.shell=root). On a
+phone that is the difference between a prompt in ten seconds and a silent minute
+or two, which is enough to run apt, ping and dpkg but not to have any service
+running.
+
+
+Continuous integration
+----------------------
+
+build, test and android run on every push to main and on pull requests. kernel,
+rootfs and release run on a v* tag: they build the kernel, the initramfs, the
+Debian disk and the APK, and attach all of it to the GitHub release. There are
+no status badges; look at the Actions tab.
+
+
+Licensing
+---------
+
+MIT. See LICENSE.
