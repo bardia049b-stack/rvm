@@ -1,0 +1,389 @@
+#include "../src/devices/virtio.h"
+#include "../src/devices/virtio_blk.h"
+#include "fixtures/harness.h"
+#include "test.h"
+
+#include <fcntl.h>
+#include <unistd.h>
+
+#define REG_MAGIC               0x000
+#define REG_VERSION             0x004
+#define REG_DEVICE_ID           0x008
+#define REG_VENDOR_ID           0x00C
+#define REG_DEVICE_FEATURES     0x010
+#define REG_DEVICE_FEATURES_SEL 0x014
+#define REG_DRIVER_FEATURES     0x020
+#define REG_DRIVER_FEATURES_SEL 0x024
+#define REG_QUEUE_SEL           0x030
+#define REG_QUEUE_NUM_MAX       0x034
+#define REG_QUEUE_NUM           0x038
+#define REG_QUEUE_READY         0x044
+#define REG_QUEUE_NOTIFY        0x050
+#define REG_INTERRUPT_STATUS    0x060
+#define REG_INTERRUPT_ACK       0x064
+#define REG_STATUS              0x070
+#define REG_QUEUE_DESC_LO       0x080
+#define REG_QUEUE_DESC_HI       0x084
+#define REG_QUEUE_DRIVER_LO     0x090
+#define REG_QUEUE_DRIVER_HI     0x094
+#define REG_QUEUE_DEVICE_LO     0x0A0
+#define REG_QUEUE_DEVICE_HI     0x0A4
+#define REG_CONFIG              0x100
+
+#define VRING_NEXT  1
+#define VRING_WRITE 2
+
+static void test_raise(void *ud, u32 irq, bool level) {
+    plic *p = (plic *)ud;
+    if (level)
+        plic_raise(p, irq);
+}
+
+void test_virtio_transport(void) {
+    bus b;
+    CHECK(bus_init(&b, 16ULL << 20) == RVM_OK);
+
+    u64 v = 0;
+    CHECK(virtio_absent_load(NULL, REG_MAGIC, 4, &v));
+    CHECK_U64(v, VIRTIO_MMIO_MAGIC);
+    CHECK(virtio_absent_load(NULL, REG_VERSION, 4, &v));
+    CHECK_U64(v, VIRTIO_VERSION);
+    CHECK(virtio_absent_load(NULL, REG_DEVICE_ID, 4, &v));
+    CHECK_U64(v, 0);
+
+    const char *path = "/tmp/rvm-test-virtio-transport.img";
+    unlink(path);
+    virtio_blk blk;
+    CHECK(virtio_blk_open(&blk, path, 16ULL << 20, true) == RVM_OK);
+    virtio dev;
+    CHECK(virtio_init(&dev, &b, virtio_blk_backend(&blk), 1) == RVM_OK);
+
+    CHECK(virtio_load(&dev, REG_MAGIC, 4, &v));
+    CHECK_U64(v, VIRTIO_MMIO_MAGIC);
+    CHECK(virtio_load(&dev, REG_VERSION, 4, &v));
+    CHECK_U64(v, VIRTIO_VERSION);
+    CHECK(virtio_load(&dev, REG_DEVICE_ID, 4, &v));
+    CHECK_U64(v, VIRTIO_ID_BLOCK);
+    CHECK(virtio_load(&dev, REG_VENDOR_ID, 4, &v));
+    CHECK_U64(v, VIRTIO_VENDOR);
+
+    CHECK(virtio_store(&dev, REG_DEVICE_FEATURES_SEL, 4, 0));
+    CHECK(virtio_load(&dev, REG_DEVICE_FEATURES, 4, &v));
+    CHECK_U64(v & (1u << VIRTIO_BLK_F_BLK_SIZE), 1u << VIRTIO_BLK_F_BLK_SIZE);
+    CHECK_U64(v & (1u << VIRTIO_BLK_F_FLUSH), 1u << VIRTIO_BLK_F_FLUSH);
+    CHECK(virtio_store(&dev, REG_DEVICE_FEATURES_SEL, 4, 1));
+    CHECK(virtio_load(&dev, REG_DEVICE_FEATURES, 4, &v));
+    CHECK_U64(v, 1u << (VIRTIO_F_VERSION_1 - 32));
+
+    CHECK(virtio_store(&dev, REG_QUEUE_SEL, 4, 0));
+    CHECK(virtio_load(&dev, REG_QUEUE_NUM_MAX, 4, &v));
+    CHECK_U64(v, VIRTQUEUE_NUM_MAX);
+
+    CHECK(virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK));
+    CHECK(virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER));
+    CHECK(virtio_store(&dev, REG_DRIVER_FEATURES_SEL, 4, 0));
+    CHECK(virtio_store(&dev, REG_DRIVER_FEATURES, 4, 0x80000000u));
+    CHECK(virtio_store(&dev, REG_STATUS, 4,
+                       VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK));
+    CHECK(virtio_load(&dev, REG_STATUS, 4, &v));
+    CHECK_U64(v & VIRTIO_STATUS_FEATURES_OK, 0);
+
+    CHECK(virtio_store(&dev, REG_STATUS, 4, 0));
+    CHECK(virtio_load(&dev, REG_STATUS, 4, &v));
+    CHECK_U64(v, 0);
+    CHECK_U64(dev.driver_features, 0);
+
+    u64 cap = 0;
+    CHECK(virtio_load(&dev, REG_CONFIG, 4, &cap));
+    CHECK(virtio_load(&dev, REG_CONFIG + 4, 4, &v));
+    cap |= v << 32;
+    CHECK_U64(cap, (16ULL << 20) / VIRTIO_BLK_SECTOR_SIZE);
+
+    u64 magic = 0;
+    CHECK(virtio_load(&dev, REG_MAGIC, 4, &magic));
+    CHECK(virtio_load(&dev, REG_MAGIC, 2, &v));
+    CHECK_U64(v, magic & 0xFFFFu);
+    CHECK(virtio_load(&dev, REG_MAGIC + 2, 2, &v));
+    CHECK_U64(v, magic >> 16);
+    CHECK(virtio_load(&dev, REG_CONFIG, 1, &v));
+    CHECK_U64(v, cap & 0xFFu);
+    CHECK(virtio_load(&dev, REG_CONFIG + 3, 1, &v));
+    CHECK_U64(v, (cap >> 24) & 0xFFu);
+    CHECK(!virtio_load(&dev, REG_MAGIC, 3, &v));
+    CHECK(!virtio_load(&dev, REG_MAGIC, 0, &v));
+
+    virtio_blk_close(&blk);
+    unlink(path);
+    bus_free(&b);
+}
+
+typedef struct {
+    u64 addr;
+    u32 len;
+    u16 flags;
+    u16 next;
+} __attribute__((packed)) test_vring_desc;
+
+static void put_desc(bus *b, u64 tbl, u32 i, u64 addr, u32 len, u16 flags, u16 next) {
+    test_vring_desc d = {addr, len, flags, next};
+    bus_write_bytes(b, tbl + 16ULL * i, &d, sizeof(d));
+}
+
+void test_virtio_blk_roundtrip(void) {
+    bus b;
+    CHECK(bus_init(&b, 16ULL << 20) == RVM_OK);
+    plic p;
+    CHECK(plic_init(&p) == RVM_OK);
+
+    const char *path = "/tmp/rvm-test-virtio-blk.img";
+    unlink(path);
+    virtio_blk blk;
+    CHECK(virtio_blk_open(&blk, path, 1ULL << 20, true) == RVM_OK);
+    virtio dev;
+    CHECK(virtio_init(&dev, &b, virtio_blk_backend(&blk), 1) == RVM_OK);
+    virtio_set_irq(&dev, test_raise, &p);
+
+    virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK);
+    virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+    virtio_store(&dev, REG_DRIVER_FEATURES_SEL, 4, 1);
+    virtio_store(&dev, REG_DRIVER_FEATURES, 4, 1u << (VIRTIO_F_VERSION_1 - 32));
+    virtio_store(&dev, REG_STATUS, 4,
+                 VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
+    u64 st = 0;
+    virtio_load(&dev, REG_STATUS, 4, &st);
+    CHECK_U64(st & VIRTIO_STATUS_FEATURES_OK, VIRTIO_STATUS_FEATURES_OK);
+
+    const u64 DESC = RVM_RAM_BASE + 0x200000ULL;
+    const u64 AVAIL = RVM_RAM_BASE + 0x201000ULL;
+    const u64 USED = RVM_RAM_BASE + 0x202000ULL;
+    const u64 HDR = RVM_RAM_BASE + 0x203000ULL;
+    const u64 DATA = RVM_RAM_BASE + 0x204000ULL;
+    const u64 STATUS = RVM_RAM_BASE + 0x205000ULL;
+    const u32 QNUM = 8;
+
+    virtio_store(&dev, REG_QUEUE_SEL, 4, 0);
+    virtio_store(&dev, REG_QUEUE_NUM, 4, QNUM);
+    virtio_store(&dev, REG_QUEUE_DESC_LO, 4, (u32)DESC);
+    virtio_store(&dev, REG_QUEUE_DESC_HI, 4, (u32)(DESC >> 32));
+    virtio_store(&dev, REG_QUEUE_DRIVER_LO, 4, (u32)AVAIL);
+    virtio_store(&dev, REG_QUEUE_DRIVER_HI, 4, (u32)(AVAIL >> 32));
+    virtio_store(&dev, REG_QUEUE_DEVICE_LO, 4, (u32)USED);
+    virtio_store(&dev, REG_QUEUE_DEVICE_HI, 4, (u32)(USED >> 32));
+    virtio_store(&dev, REG_QUEUE_READY, 4, 1);
+    virtio_store(&dev, REG_STATUS, 4,
+                 VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK |
+                     VIRTIO_STATUS_DRIVER_OK);
+    CHECK(dev.driver_ok);
+
+    u8 pattern[512];
+    for (u32 i = 0; i < sizeof(pattern); i++)
+        pattern[i] = (u8)(i * 7 + 3);
+
+    u8 hdr[16];
+    memset(hdr, 0, sizeof(hdr));
+    u32 type = VIRTIO_BLK_T_OUT;
+    u64 sector = 0;
+    memcpy(hdr + 0, &type, 4);
+    memcpy(hdr + 8, &sector, 8);
+    bus_write_bytes(&b, HDR, hdr, sizeof(hdr));
+    bus_write_bytes(&b, DATA, pattern, sizeof(pattern));
+    bus_store(&b, STATUS, 1, 0xEE);
+
+    put_desc(&b, DESC, 0, HDR, 16, VRING_NEXT, 1);
+    put_desc(&b, DESC, 1, DATA, sizeof(pattern), VRING_NEXT, 2);
+    put_desc(&b, DESC, 2, STATUS, 1, VRING_WRITE, 0);
+    bus_store(&b, AVAIL + 0, 2, 0);
+    bus_store(&b, AVAIL + 2, 2, 1);
+    bus_store(&b, AVAIL + 4, 2, 0);
+
+    virtio_store(&dev, REG_QUEUE_NOTIFY, 4, 0);
+
+    u64 used_idx = 0, elem_id = 0, elem_len = 0, status_byte = 0xEE;
+    bus_load(&b, USED + 2, 2, &used_idx);
+    bus_load(&b, USED + 4 + 0, 4, &elem_id);
+    bus_load(&b, USED + 4 + 4, 4, &elem_len);
+    bus_load(&b, STATUS, 1, &status_byte);
+    CHECK_U64(used_idx, 1);
+    CHECK_U64(elem_id, 0);
+    CHECK_U64(elem_len, 1);
+    CHECK_U64(status_byte, VIRTIO_BLK_S_OK);
+    CHECK_U64(blk.n_write, 1);
+
+    CHECK_U64(dev.irq_status & 1, 1);
+    CHECK_U64(p.pending[1 / 32] & (1u << 1), 1u << 1);
+
+    {
+        int fd = open(path, O_RDONLY);
+        CHECK(fd >= 0);
+        u8 readback[512];
+        ssize_t n = pread(fd, readback, sizeof(readback), 0);
+        CHECK_U64((u64)n, sizeof(readback));
+        CHECK_MEM(readback, pattern, sizeof(pattern));
+        close(fd);
+    }
+
+    u8 scratch[512];
+    memset(scratch, 0, sizeof(scratch));
+    bus_write_bytes(&b, DATA, scratch, sizeof(scratch));
+    memset(hdr, 0, sizeof(hdr));
+    type = VIRTIO_BLK_T_IN;
+    sector = 0;
+    memcpy(hdr + 0, &type, 4);
+    memcpy(hdr + 8, &sector, 8);
+    bus_write_bytes(&b, HDR, hdr, sizeof(hdr));
+    bus_store(&b, STATUS, 1, 0xEE);
+    put_desc(&b, DESC, 1, DATA, sizeof(scratch), VRING_NEXT | VRING_WRITE, 2);
+    bus_store(&b, AVAIL + 2, 2, 2);
+    bus_store(&b, AVAIL + 4 + 2 * 1, 2, 0);
+
+    virtio_store(&dev, REG_QUEUE_NOTIFY, 4, 0);
+
+    bus_load(&b, USED + 2, 2, &used_idx);
+    bus_load(&b, USED + 4 + 8 * 1 + 4, 4, &elem_len);
+    bus_load(&b, STATUS, 1, &status_byte);
+    CHECK_U64(used_idx, 2);
+    CHECK_U64(elem_len, 1 + sizeof(scratch));
+    CHECK_U64(status_byte, VIRTIO_BLK_S_OK);
+    CHECK_U64(blk.n_read, 1);
+    bus_read_bytes(&b, DATA, scratch, sizeof(scratch));
+    CHECK_MEM(scratch, pattern, sizeof(pattern));
+
+    memset(hdr, 0, sizeof(hdr));
+    type = VIRTIO_BLK_T_FLUSH;
+    memcpy(hdr + 0, &type, 4);
+    bus_write_bytes(&b, HDR, hdr, sizeof(hdr));
+    bus_store(&b, STATUS, 1, 0xEE);
+    bus_store(&b, AVAIL + 2, 2, 3);
+    bus_store(&b, AVAIL + 4 + 2 * 2, 2, 0);
+    virtio_store(&dev, REG_QUEUE_NOTIFY, 4, 0);
+    bus_load(&b, STATUS, 1, &status_byte);
+    CHECK_U64(status_byte, VIRTIO_BLK_S_OK);
+    CHECK_U64(blk.n_flush, 1);
+
+    memset(hdr, 0, sizeof(hdr));
+    type = 999;
+    memcpy(hdr + 0, &type, 4);
+    bus_write_bytes(&b, HDR, hdr, sizeof(hdr));
+    bus_store(&b, STATUS, 1, 0);
+    bus_store(&b, AVAIL + 2, 2, 4);
+    bus_store(&b, AVAIL + 4 + 2 * 3, 2, 0);
+    virtio_store(&dev, REG_QUEUE_NOTIFY, 4, 0);
+    bus_load(&b, STATUS, 1, &status_byte);
+    CHECK_U64(status_byte, VIRTIO_BLK_S_UNSUPP);
+
+    virtio_store(&dev, REG_INTERRUPT_ACK, 4, 1);
+    CHECK_U64(dev.irq_status & 1, 0);
+
+    virtio_blk_close(&blk);
+    unlink(path);
+    bus_free(&b);
+}
+
+void test_virtio_blk_long_chain(void) {
+    enum { NBUF = 40, BUFSZ = 512 };
+    bus b;
+    CHECK(bus_init(&b, 16ULL << 20) == RVM_OK);
+    plic p;
+    CHECK(plic_init(&p) == RVM_OK);
+
+    const char *path = "/tmp/rvm-test-virtio-longchain.img";
+    unlink(path);
+    virtio_blk blk;
+    CHECK(virtio_blk_open(&blk, path, 1ULL << 20, true) == RVM_OK);
+    virtio dev;
+    CHECK(virtio_init(&dev, &b, virtio_blk_backend(&blk), 1) == RVM_OK);
+    virtio_set_irq(&dev, test_raise, &p);
+
+    virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK);
+    virtio_store(&dev, REG_STATUS, 4, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+    virtio_store(&dev, REG_DRIVER_FEATURES_SEL, 4, 1);
+    virtio_store(&dev, REG_DRIVER_FEATURES, 4, 1u << (VIRTIO_F_VERSION_1 - 32));
+    virtio_store(&dev, REG_STATUS, 4,
+                 VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK |
+                     VIRTIO_STATUS_DRIVER_OK);
+
+    const u64 DESC = RVM_RAM_BASE + 0x200000ULL;
+    const u64 AVAIL = RVM_RAM_BASE + 0x201000ULL;
+    const u64 USED = RVM_RAM_BASE + 0x202000ULL;
+    const u64 HDR = RVM_RAM_BASE + 0x203000ULL;
+    const u64 DATA = RVM_RAM_BASE + 0x204000ULL;
+    const u64 STATUS = RVM_RAM_BASE + 0x20a000ULL;
+
+    virtio_store(&dev, REG_QUEUE_SEL, 4, 0);
+    virtio_store(&dev, REG_QUEUE_NUM, 4, 64);
+    virtio_store(&dev, REG_QUEUE_DESC_LO, 4, (u32)DESC);
+    virtio_store(&dev, REG_QUEUE_DESC_HI, 4, (u32)(DESC >> 32));
+    virtio_store(&dev, REG_QUEUE_DRIVER_LO, 4, (u32)AVAIL);
+    virtio_store(&dev, REG_QUEUE_DRIVER_HI, 4, (u32)(AVAIL >> 32));
+    virtio_store(&dev, REG_QUEUE_DEVICE_LO, 4, (u32)USED);
+    virtio_store(&dev, REG_QUEUE_DEVICE_HI, 4, (u32)(USED >> 32));
+    virtio_store(&dev, REG_QUEUE_READY, 4, 1);
+    CHECK(dev.driver_ok);
+
+    static u8 disk[NBUF * BUFSZ];
+    for (u32 i = 0; i < sizeof(disk); i++)
+        disk[i] = (u8)(i * 31 + 5);
+    int fd = open(path, O_RDWR);
+    CHECK(fd >= 0);
+    CHECK_U64((u64)pwrite(fd, disk, sizeof(disk), 0), sizeof(disk));
+
+    u8 hdr[16];
+    memset(hdr, 0, sizeof(hdr));
+    u32 type = VIRTIO_BLK_T_IN;
+    u64 sector = 0;
+    memcpy(hdr + 0, &type, 4);
+    memcpy(hdr + 8, &sector, 8);
+    bus_write_bytes(&b, HDR, hdr, sizeof(hdr));
+
+    u8 zero[BUFSZ];
+    memset(zero, 0, sizeof(zero));
+    for (u32 i = 0; i < NBUF; i++)
+        bus_write_bytes(&b, DATA + (u64)i * BUFSZ, zero, sizeof(zero));
+    bus_store(&b, STATUS, 1, 0xEE);
+
+    for (u32 i = 0; i <= NBUF + 1; i++) {
+        u64 addr;
+        u32 len;
+        u16 flags = VRING_NEXT, next = (u16)(i + 1);
+        if (i == 0) {
+            addr = HDR;
+            len = sizeof(hdr);
+        } else if (i <= NBUF) {
+            addr = DATA + (u64)(i - 1) * BUFSZ;
+            len = BUFSZ;
+            flags = (u16)(VRING_NEXT | VRING_WRITE);
+        } else {
+            addr = STATUS;
+            len = 1;
+            flags = VRING_WRITE;
+            next = 0;
+        }
+        put_desc(&b, DESC, i, addr, len, flags, next);
+    }
+    bus_store(&b, AVAIL + 0, 2, 0);
+    bus_store(&b, AVAIL + 2, 2, 1);
+    bus_store(&b, AVAIL + 4, 2, 0);
+
+    virtio_store(&dev, REG_QUEUE_NOTIFY, 4, 0);
+
+    u64 used_idx = 0, elem_len = 0, status_byte = 0xEE;
+    bus_load(&b, USED + 2, 2, &used_idx);
+    bus_load(&b, USED + 4 + 4, 4, &elem_len);
+    bus_load(&b, STATUS, 1, &status_byte);
+    CHECK_U64(used_idx, 1);
+    CHECK_U64(status_byte, VIRTIO_BLK_S_OK);
+    CHECK_U64(elem_len, 1 + NBUF * BUFSZ);
+    CHECK_U64(blk.n_read, 1);
+    CHECK_U64(blk.n_err, 0);
+
+    for (u32 i = 0; i < NBUF; i++) {
+        u8 got[BUFSZ];
+        bus_read_bytes(&b, DATA + (u64)i * BUFSZ, got, sizeof(got));
+        CHECK_MEM(got, disk + (u64)i * BUFSZ, sizeof(got));
+    }
+
+    close(fd);
+    virtio_blk_close(&blk);
+    unlink(path);
+    bus_free(&b);
+}
