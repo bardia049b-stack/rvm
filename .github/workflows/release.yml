@@ -1,0 +1,133 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (must already exist)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: gate (lint + tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-14 clang-18 device-tree-compiler
+
+      - name: Lint and test
+        run: |
+          make lint
+          ./scripts/test.sh -v --werror -j"$(nproc)"
+
+  apk:
+    name: build apk
+    runs-on: ubuntu-24.04
+    needs: gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018 cmake;3.22.1'
+
+      - name: Accept the SDK licences
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Assemble release
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/*.apk out/rvm.apk
+          ls -l out/
+
+      - name: Check the APK actually contains the app
+        run: |
+          LIST=$(unzip -l out/rvm.apk)
+          echo "$LIST"
+          fail() { echo "::error::$1"; exit 1; }
+          echo "$LIST" | grep -q 'classes[0-9]*\.dex' || fail "no classes.dex"
+          for abi in arm64-v8a x86_64; do
+            echo "$LIST" | grep -q "lib/$abi/librvm_jni.so" \
+              || fail "no lib/$abi/librvm_jni.so"
+          done
+          unzip -p out/rvm.apk 'classes*.dex' > /tmp/classes.dex
+          for sym in MainActivity RvmNative RvmView GfxView KeyBar; do
+            grep -aq "$sym" /tmp/classes.dex || fail "$sym missing from dex"
+          done
+          echo "the APK carries all five classes and both ABIs"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: out/rvm.apk
+
+  publish:
+    name: publish
+    runs-on: ubuntu-24.04
+    needs: apk
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-apk
+          path: assets
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          generate_release_notes: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            Install `rvm.apk` (arm64-v8a and x86_64), then download the other three.
+
+            | file | what it is |
+            | --- | --- |
+            | `Image` | riscv64 Linux 6.12 with virtio-mmio, virtio-blk, virtio-net and ext4 built in |
+            | `initrd.img` | busybox initramfs: brings eth0 up, then hands the console to `/dev/vda` |
+            | `disk.img.gz` | Debian 13 minbase with getty, apt, curl and eth0 up at boot. Unzip it first |
+
+            The kernel, the initrd and the disk have to come from the same release, or the
+            boot will end somewhere it should not.
+
+            In the app: menu -> Kernel, Disk, Initrd, pick the files, then menu -> Boot.
+            Nothing else to configure.
+
+            Networking is the emulator's own userspace NAT: the guest gets 10.0.2.15/24 with
+            gateway 10.0.2.2 and resolver 10.0.2.3, so ping, curl, wget and ssh out work
+            inside the guest without a TAP device or root. The address is negotiated by
+            `initrd.img` as the kernel hands over, so keep booting with all three files.
+            To let the guest ask again, `dhclient eth0` still works. `apt-get update` is
+            broken inside the guest at the moment; see the CHANGELOG for what is known.
+
+          files: assets/rvm.apk
+          fail_on_unmatched_files: true
